@@ -132,6 +132,12 @@ func cleanupOriginals(db *sql.DB, dir string, dryRun bool) ([]string, error) {
 	}
 	defer stmt.Close()
 
+	baseStmt, err := db.Prepare(`SELECT COUNT(*) FROM Files WHERE file_name like ?`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare SQL statement: %w", err)
+	}
+	defer baseStmt.Close()
+
 	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return fmt.Errorf("error accessing path %s: %w", path, err)
@@ -158,9 +164,10 @@ func cleanupOriginals(db *sql.DB, dir string, dryRun bool) ([]string, error) {
 
 		// Workaround for live photo bug.
 		if !exists {
-			livePath := strings.TrimSuffix(normalizedPath, ".HEIC") + ".MOV"
+			ext := filepath.Ext(normalizedPath)
+			livePath := strings.TrimSuffix(normalizedPath, ext) + "%"
 
-			exists, err = checkPathExists(stmt, livePath)
+			exists, err = checkPathExists(baseStmt, livePath)
 			if err != nil {
 				return fmt.Errorf("failed to check path %s: %w", normalizedPath, err)
 			}

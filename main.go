@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"io/ioutil"
 	"strings"
 
 	_ "github.com/mattn/go-sqlite3" // SQLite driver
@@ -24,18 +23,23 @@ type Config struct {
 
 // LoadConfig reads the configuration from a JSON file.
 func LoadConfig(configPath string) (*Config, error) {
-	data, err := ioutil.ReadFile(configPath)
+	config := &Config{
+		DryRun: true,
+	}
+	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return nil, fmt.Errorf("could not read config file: %w", err)
+		if os.IsNotExist(err) {
+			return config, nil
+		}
+		return config, fmt.Errorf("could not read config file: %w", err)
 	}
 
-	var config Config
-	err = json.Unmarshal(data, &config)
+	err = json.Unmarshal(data, config)
 	if err != nil {
 		return nil, fmt.Errorf("could not parse config file: %w", err)
 	}
 
-	return &config, nil
+	return config, nil
 }
 
 func printHelp() {
@@ -72,7 +76,7 @@ func checkPathExists(stmt *sql.Stmt, path string) (bool, error) {
 
 func cleanupThumbnails(db *sql.DB, dir string, dryRun bool) ([]string, error) {
 	var filesToDelete []string
-	
+
 	stmt, err := db.Prepare(`SELECT COUNT(*) FROM Files WHERE file_hash = ?`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare SQL statement: %w", err)
@@ -122,7 +126,7 @@ func cleanupOriginals(db *sql.DB, dir string, dryRun bool) ([]string, error) {
 	var filesToDelete []string
 
 	// 使用CONCAT(file_root, file_path)确保路径拼接正确
-	stmt, err := db.Prepare(`SELECT COUNT(*) FROM Files WHERE file_root || file_path = ?`)
+	stmt, err := db.Prepare(`SELECT COUNT(*) FROM Files WHERE file_name = ?`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare SQL statement: %w", err)
 	}
@@ -145,11 +149,21 @@ func cleanupOriginals(db *sql.DB, dir string, dryRun bool) ([]string, error) {
 
 		// 规范化路径分隔符为/
 		normalizedPath := strings.ReplaceAll(relPath, string(os.PathSeparator), "/")
-		
+
 		// 检查路径是否存在于数据库中
 		exists, err := checkPathExists(stmt, normalizedPath)
 		if err != nil {
 			return fmt.Errorf("failed to check path %s: %w", normalizedPath, err)
+		}
+
+		// Workaround for live photo bug.
+		if !exists {
+			livePath := strings.TrimSuffix(normalizedPath, ".HEIC") + ".MOV"
+
+			exists, err = checkPathExists(stmt, livePath)
+			if err != nil {
+				return fmt.Errorf("failed to check path %s: %w", normalizedPath, err)
+			}
 		}
 
 		if !exists {
@@ -186,7 +200,7 @@ func main() {
 	dbPath := flag.String("db", "", "Path to the SQLite database (override config).")
 	thumbDir := flag.String("thumb-dir", "", "Path to the thumbnail directory (override config).")
 	originDir := flag.String("origin-dir", "", "Path to the origin directory (override config).")
-	dryRun := flag.Bool("dry-run", true, "Simulate the deletion of files without actually deleting them (override config).")
+	dryRun := flag.String("dry-run", "", "Simulate the deletion of files without actually deleting them (override config).")
 	help := flag.Bool("h", false, "Show help message.")
 	flag.Parse()
 
@@ -214,11 +228,11 @@ func main() {
 	if *originDir != "" {
 		config.OriginDir = *originDir
 	}
-	if !*dryRun {
-		config.DryRun = false
+	if *dryRun != "" {
+		config.DryRun = (*dryRun == "true")
 	}
 
-	fmt.Printf("Using config: DB=%s, ThumbDir=%s, OriginDir=%s, DryRun=%t\n", 
+	fmt.Printf("Using config: DB=%s, ThumbDir=%s, OriginDir=%s, DryRun=%t\n",
 		config.DB, config.ThumbDir, config.OriginDir, config.DryRun)
 
 	db, err := sql.Open("sqlite3", config.DB)
@@ -262,7 +276,7 @@ func main() {
 
 	// 打印统计信息
 	if totalFiles > 0 {
-		fmt.Printf("\nTotal number of affected files: %d (thumbnails: %d, originals: %d)\n", 
+		fmt.Printf("\nTotal number of affected files: %d (thumbnails: %d, originals: %d)\n",
 			totalFiles, len(thumbFiles), len(originFiles))
 	} else {
 		fmt.Println("\nNo files were marked for deletion.")

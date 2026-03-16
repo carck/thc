@@ -21,6 +21,55 @@ type Config struct {
 	DryRun    bool   `json:"dry_run"`
 }
 
+var imageExt = map[string]bool{
+	".jpg":  true,
+	".jpeg": true,
+	".jxl":  true,
+	".png":  true,
+	".gif":  true,
+	".bmp":  true,
+	".webp": true,
+	".avif": true,
+	".heic": true,
+	".heif": true,
+	".tif":  true,
+	".tiff": true,
+	".svg":  true,
+	".ico":  true,
+}
+
+var videoExt = map[string]bool{
+	".mp4":  true,
+	".m4v":  true,
+	".mov":  true,
+	".avi":  true,
+	".mkv":  true,
+	".webm": true,
+	".flv":  true,
+	".wmv":  true,
+	".mpg":  true,
+	".mpeg": true,
+	".3gp":  true,
+	".3g2":  true,
+	".ts":   true,
+	".m2ts": true,
+	".mts":  true,
+	".vob":  true,
+	".ogv":  true,
+}
+
+func MediaType(filename string) string {
+	ext := strings.ToLower(filepath.Ext(filename))
+
+	if imageExt[ext] {
+		return "image"
+	}
+	if videoExt[ext] {
+		return "video"
+	}
+	return "other"
+}
+
 // LoadConfig reads the configuration from a JSON file.
 func LoadConfig(configPath string) (*Config, error) {
 	config := &Config{
@@ -144,6 +193,10 @@ func cleanupOriginals(db *sql.DB, dir string, dryRun bool) ([]string, error) {
 		}
 
 		if d.IsDir() {
+			return nil
+		}
+
+		if MediaType(path) != "image" && MediaType(path) != "video" {
 			return nil
 		}
 

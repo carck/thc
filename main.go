@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha1"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -58,9 +60,56 @@ var videoExt = map[string]bool{
 	".ogv":  true,
 }
 
+const hashSize = 16 * 1024
+
+// Hash returns the SHA1 hash of a file as string.
+func Hash(fileName string) (string, error) {
+	bytes, err := readHashBytes(fileName)
+	if err != nil {
+		return "", err
+	}
+	hash := sha1.New()
+	if _, hErr := hash.Write(bytes); hErr != nil {
+		return "", hErr
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func readHashBytes(filePath string) ([]byte, error) {
+	fi, err := os.Stat(filePath)
+	if err != nil {
+		return nil, err
+	} else if fi.Size() <= hashSize {
+		return os.ReadFile(filePath)
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	firstBytes := make([]byte, hashSize/2)
+	if _, e := file.ReadAt(firstBytes, 0); e != nil {
+		return nil, fmt.Errorf("couldn't read first few bytes: %+v", e)
+	}
+
+	middleBytes := make([]byte, hashSize/4)
+	if _, e := file.ReadAt(middleBytes, fi.Size()/2); e != nil {
+		return nil, fmt.Errorf("couldn't read middle bytes: %+v", e)
+	}
+
+	lastBytes := make([]byte, hashSize/4)
+	if _, e := file.ReadAt(lastBytes, fi.Size()-hashSize/4); e != nil {
+		return nil, fmt.Errorf("couldn't read end bytes: %+v", e)
+	}
+
+	bytes := append(append(firstBytes, middleBytes...), lastBytes...)
+	return bytes, nil
+}
+
 func MediaType(filename string) string {
 	ext := strings.ToLower(filepath.Ext(filename))
-
 	if imageExt[ext] {
 		return "image"
 	}
@@ -72,19 +121,17 @@ func MediaType(filename string) string {
 
 // LoadConfig reads the configuration from a JSON file.
 func LoadConfig(configPath string) (*Config, error) {
-	config := &Config{
-		DryRun: true,
-	}
+	config := &Config{DryRun: true}
+
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return config, nil
 		}
-		return config, fmt.Errorf("could not read config file: %w", err)
+		return nil, fmt.Errorf("could not read config file: %w", err)
 	}
 
-	err = json.Unmarshal(data, config)
-	if err != nil {
+	if err := json.Unmarshal(data, config); err != nil {
 		return nil, fmt.Errorf("could not parse config file: %w", err)
 	}
 
@@ -98,10 +145,10 @@ func printHelp() {
 	fmt.Println("  --db          Path to the SQLite database (override config).")
 	fmt.Println("  --thumb-dir   Path to the thumbnail directory (override config).")
 	fmt.Println("  --origin-dir  Path to the origin directory (override config).")
-	fmt.Println("  --dry-run     Simulate the deletion of files without actually deleting them (override config).")
+	fmt.Println("  --dry-run     Simulate the deletion of files without actually deleting them (default: true).")
 	fmt.Println("  -h, --help    Show this help message.")
 	fmt.Println("\nExample usage:")
-	fmt.Println("  go run main.go --db ./mydb.db --thumb-dir ./thumbs --origin-dir ./originals --dry-run")
+	fmt.Println("  go run main.go --db ./mydb.db --thumb-dir ./thumbs --origin-dir ./originals --dry-run=false")
 }
 
 func checkHashExists(stmt *sql.Stmt, hash string) (bool, error) {
@@ -123,9 +170,17 @@ func checkPathExists(stmt *sql.Stmt, path string) (bool, error) {
 	return count > 0, nil
 }
 
+func checkFileHashExists(stmt *sql.Stmt, hash string, size int64) (bool, error) {
+	var count int
+	err := stmt.QueryRow(hash, size).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 func cleanupThumbnails(db *sql.DB, dir string, dryRun bool) ([]string, error) {
 	var filesToDelete []string
-
 	stmt, err := db.Prepare(`SELECT COUNT(*) FROM Files WHERE file_hash = ?`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare SQL statement: %w", err)
@@ -138,7 +193,6 @@ func cleanupThumbnails(db *sql.DB, dir string, dryRun bool) ([]string, error) {
 		if err != nil {
 			return fmt.Errorf("error accessing path %s: %w", path, err)
 		}
-
 		if d.IsDir() {
 			return nil
 		}
@@ -174,24 +228,28 @@ func cleanupThumbnails(db *sql.DB, dir string, dryRun bool) ([]string, error) {
 func cleanupOriginals(db *sql.DB, dir string, dryRun bool) ([]string, error) {
 	var filesToDelete []string
 
-	// 使用CONCAT(file_root, file_path)确保路径拼接正确
 	stmt, err := db.Prepare(`SELECT COUNT(*) FROM Files WHERE file_name = ?`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare SQL statement: %w", err)
 	}
 	defer stmt.Close()
 
-	baseStmt, err := db.Prepare(`SELECT COUNT(*) FROM Files WHERE file_name like ?`)
+	baseStmt, err := db.Prepare(`SELECT COUNT(*) FROM Files WHERE file_name LIKE ?`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare SQL statement: %w", err)
 	}
 	defer baseStmt.Close()
 
+	hasStmt, err := db.Prepare(`SELECT COUNT(*) FROM Files WHERE file_hash=? AND file_size=?`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare SQL statement: %w", err)
+	}
+	defer hasStmt.Close()
+
 	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return fmt.Errorf("error accessing path %s: %w", path, err)
 		}
-
 		if d.IsDir() {
 			return nil
 		}
@@ -200,29 +258,36 @@ func cleanupOriginals(db *sql.DB, dir string, dryRun bool) ([]string, error) {
 			return nil
 		}
 
-		// 获取相对于origin目录的路径
 		relPath, err := filepath.Rel(dir, path)
 		if err != nil {
 			return fmt.Errorf("failed to get relative path for %s: %w", path, err)
 		}
-
-		// 规范化路径分隔符为/
 		normalizedPath := strings.ReplaceAll(relPath, string(os.PathSeparator), "/")
 
-		// 检查路径是否存在于数据库中
 		exists, err := checkPathExists(stmt, normalizedPath)
 		if err != nil {
 			return fmt.Errorf("failed to check path %s: %w", normalizedPath, err)
 		}
 
-		// Workaround for live photo bug.
 		if !exists {
 			ext := filepath.Ext(normalizedPath)
 			livePath := strings.TrimSuffix(normalizedPath, ext) + "%"
 
 			exists, err = checkPathExists(baseStmt, livePath)
 			if err != nil {
-				return fmt.Errorf("failed to check path %s: %w", normalizedPath, err)
+				return fmt.Errorf("failed to check live path %s: %w", livePath, err)
+			}
+
+			if !exists {
+				hash, hErr := Hash(path)
+				if hErr != nil {
+					return hErr
+				}
+				info, _ := os.Stat(path)
+				exists, err = checkFileHashExists(hasStmt, hash, info.Size())
+				if err != nil {
+					return fmt.Errorf("failed to check hash for %s: %w", normalizedPath, err)
+				}
 			}
 		}
 
@@ -256,11 +321,12 @@ func deleteFiles(files []string, dryRun bool) error {
 }
 
 func main() {
+	// Define flags
 	configPath := flag.String("config", "./config.json", "Path to the JSON configuration file.")
 	dbPath := flag.String("db", "", "Path to the SQLite database (override config).")
 	thumbDir := flag.String("thumb-dir", "", "Path to the thumbnail directory (override config).")
 	originDir := flag.String("origin-dir", "", "Path to the origin directory (override config).")
-	dryRun := flag.String("dry-run", "", "Simulate the deletion of files without actually deleting them (override config).")
+	dryRun := flag.Bool("dry-run", true, "Simulate deletion without actually removing files (override config).")
 	help := flag.Bool("h", false, "Show help message.")
 	flag.Parse()
 
@@ -269,16 +335,14 @@ func main() {
 		return
 	}
 
+	// Load config
 	config, err := LoadConfig(*configPath)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			fmt.Printf("Error loading config file: %v\n", err)
-			return
-		}
-		fmt.Println("Config file not found, using default values.")
-		config = &Config{}
+		fmt.Printf("Error loading config file: %v\n", err)
+		return
 	}
 
+	// Override config with flags
 	if *dbPath != "" {
 		config.DB = *dbPath
 	}
@@ -288,8 +352,8 @@ func main() {
 	if *originDir != "" {
 		config.OriginDir = *originDir
 	}
-	if *dryRun != "" {
-		config.DryRun = (*dryRun == "true")
+	if dryRun != nil {
+		config.DryRun = *dryRun
 	}
 
 	fmt.Printf("Using config: DB=%s, ThumbDir=%s, OriginDir=%s, DryRun=%t\n",
@@ -302,11 +366,9 @@ func main() {
 	}
 	defer db.Close()
 
-	var (
-		thumbFiles  []string
-		originFiles []string
-		totalFiles  int
-	)
+	var totalFiles int
+	thumbFiles := []string{}
+	originFiles := []string{}
 
 	if config.ThumbDir != "" {
 		thumbFiles, err = cleanupThumbnails(db, config.ThumbDir, config.DryRun)
@@ -326,7 +388,6 @@ func main() {
 		totalFiles += len(originFiles)
 	}
 
-	// 统一处理删除操作
 	if err := deleteFiles(thumbFiles, config.DryRun); err != nil {
 		fmt.Printf("Error deleting thumbnails: %v\n", err)
 	}
@@ -334,9 +395,8 @@ func main() {
 		fmt.Printf("Error deleting originals: %v\n", err)
 	}
 
-	// 打印统计信息
 	if totalFiles > 0 {
-		fmt.Printf("\nTotal number of affected files: %d (thumbnails: %d, originals: %d)\n",
+		fmt.Printf("\nTotal affected files: %d (thumbnails: %d, originals: %d)\n",
 			totalFiles, len(thumbFiles), len(originFiles))
 	} else {
 		fmt.Println("\nNo files were marked for deletion.")

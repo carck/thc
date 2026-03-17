@@ -355,7 +355,7 @@ func main() {
 	dbPath := flag.String("db", "", "Path to the SQLite database (override config).")
 	thumbDir := flag.String("thumb-dir", "", "Path to the thumbnail directory (override config).")
 	originDir := flag.String("origin-dir", "", "Path to the origin directory (override config).")
-	dryRun := flag.Bool("dry-run", true, "Simulate deletion without actually removing files (override config).")
+	dryRun := flag.String("dry-run", "", "Simulate deletion without actually removing files (override config).")
 	help := flag.Bool("h", false, "Show help message.")
 	flag.Parse()
 
@@ -381,8 +381,8 @@ func main() {
 	if *originDir != "" {
 		config.OriginDir = *originDir
 	}
-	if dryRun != nil {
-		config.DryRun = *dryRun
+	if *dryRun != "" {
+		config.DryRun = *dryRun == "true"
 	}
 
 	fmt.Printf("Using config: DB=%s, ThumbDir=%s, OriginDir=%s, DryRun=%t\n",

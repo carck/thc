@@ -324,6 +324,31 @@ func deleteFiles(files []string, dryRun bool) error {
 	return nil
 }
 
+func calculateTotalSize(files []string) (int64, error) {
+	var totalSize int64
+	for _, file := range files {
+		info, err := os.Stat(file)
+		if err != nil {
+			return 0, fmt.Errorf("failed to stat file %s: %w", file, err)
+		}
+		totalSize += info.Size()
+	}
+	return totalSize, nil
+}
+
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
 func main() {
 	// Define flags
 	configPath := flag.String("config", "./config.json", "Path to the JSON configuration file.")
@@ -392,6 +417,14 @@ func main() {
 		totalFiles += len(originFiles)
 	}
 
+	// Calculate total disk space to be freed
+	allFilesToDelete := append(thumbFiles, originFiles...)
+	totalSize, err := calculateTotalSize(allFilesToDelete)
+	if err != nil {
+		fmt.Printf("Error calculating total size: %v\n", err)
+		return
+	}
+
 	if err := deleteFiles(thumbFiles, config.DryRun); err != nil {
 		fmt.Printf("Error deleting thumbnails: %v\n", err)
 	}
@@ -402,6 +435,7 @@ func main() {
 	if totalFiles > 0 {
 		fmt.Printf("\nTotal affected files: %d (thumbnails: %d, originals: %d)\n",
 			totalFiles, len(thumbFiles), len(originFiles))
+		fmt.Printf("Estimated disk space to be freed: %s\n", formatBytes(totalSize))
 	} else {
 		fmt.Println("\nNo files were marked for deletion.")
 	}

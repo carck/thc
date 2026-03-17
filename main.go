@@ -264,6 +264,10 @@ func cleanupOriginals(db *sql.DB, dir string, dryRun bool) ([]string, error) {
 		}
 		normalizedPath := strings.ReplaceAll(relPath, string(os.PathSeparator), "/")
 
+		if !strings.HasPrefix(normalizedPath, "IPHONE") {
+			return nil
+		}
+
 		exists, err := checkPathExists(stmt, normalizedPath)
 		if err != nil {
 			return fmt.Errorf("failed to check path %s: %w", normalizedPath, err)
